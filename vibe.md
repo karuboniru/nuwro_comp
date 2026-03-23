@@ -3,6 +3,16 @@
 This document reconstructs the session that produced `nuwro_comp` as a
 concrete example of how to collaborate with an AI coding assistant effectively.
 
+> **The step-by-step development history of this session has been preserved as
+> individual commits on the [`history`][history] branch.** That branch is an
+> orphan (no shared history with `master`) and contains six commits, one per
+> major design step, so you can check out any intermediate state with
+> `git checkout history~N` or browse the diff of each step to see exactly what
+> changed and why. It serves as a concrete, runnable companion to the narrative
+> below.
+
+[history]: https://github.com/karuboniru/nuwro_comp/tree/history
+
 ---
 
 ## What we built
