@@ -1,11 +1,12 @@
+#include <array>
 #include <iostream>
 #include <map>
+#include <ranges>
 #include <string>
 #include <vector>
 
 #include <boost/program_options.hpp>
 
-#include "ROOT/RDataFrame.hxx"
 #include "ROOT/RDFHelpers.hxx"
 #include "TCanvas.h"
 #include "TFile.h"
@@ -15,45 +16,9 @@
 #include "TPad.h"
 #include "TStyle.h"
 
-#include "event1.h"
+#include "analysis.h"
 
 namespace po = boost::program_options;
-
-struct HistSet {
-    ROOT::RDF::RResultPtr<TH1D>            Enu, Q2, muKE, nout, dyn;
-    ROOT::RDF::RResultPtr<ULong64_t>       total;
-    ROOT::RDF::RResultPtr<std::vector<int>> dyns;
-};
-
-HistSet bookAnalysis(const std::vector<std::string> &files) {
-    ROOT::RDataFrame df("treeout", files);
-
-    auto d = df
-        .Define("Enu", [](const event &e) -> double {
-            return e.in.empty() ? -1.0 : const_cast<event &>(e).in[0].E();
-        }, {"e"})
-        .Define("npost", [](const event &e) { return (int)e.post.size(); }, {"e"})
-        .Define("Q2", [](const event &e) -> double {
-            if (!e.flag.cc || e.in.empty() || e.out.empty()) return -1.0;
-            auto &em = const_cast<event &>(e);
-            vect q = em.in[0] - em.out[0];
-            return -(q * q);
-        }, {"e"})
-        .Define("muKE", [](const event &e) -> double {
-            if (!e.flag.cc || e.out.empty()) return -1.0;
-            return const_cast<event &>(e).out[0].Ek();
-        }, {"e"});
-
-    return {
-        d.Filter("Enu  >= 0").Histo1D({"h_Enu",  "Neutrino energy;E_{#nu} [MeV];1/N dN/dE",         100, 0,    5000}, "Enu"),
-        d.Filter("Q2   >= 0").Histo1D({"h_Q2",   "Momentum transfer;Q^{2} [MeV^{2}];1/N dN/dQ^{2}", 100, 0,    2e6},  "Q2"),
-        d.Filter("muKE >= 0").Histo1D({"h_muKE", "Leading lepton KE;T_{#mu} [MeV];1/N dN/dT",       100, 0,    3000}, "muKE"),
-        d.Histo1D({"h_nout", "Post-FSI multiplicity;N_{out};1/N dN/dN_{out}", 20, 0, 20},  "npost"),
-        d.Histo1D({"h_dyn",  "Interaction channel;dyn;1/N dN/ddyn",           15, -0.5, 14.5}, "dyn"),
-        d.Count(),
-        d.Take<int>("dyn"),
-    };
-}
 
 double drawComparison(TH1D *h1, TH1D *h2,
                       const std::string &label1, const std::string &label2,
@@ -146,26 +111,24 @@ int main(int argc, char *argv[]) {
     auto s2 = bookAnalysis(files2);
 
     std::vector<ROOT::RDF::RResultHandle> handles;
-    for (auto &h : {s1.Enu, s1.Q2, s1.muKE, s1.nout, s1.dyn})
-        handles.push_back(h);
-    for (auto &h : {s2.Enu, s2.Q2, s2.muKE, s2.nout, s2.dyn})
-        handles.push_back(h);
+    for (auto &h : s1.histos) handles.push_back(h);
+    for (auto &h : s2.histos) handles.push_back(h);
     handles.push_back(s1.total); handles.push_back(s2.total);
     handles.push_back(s1.dyns);  handles.push_back(s2.dyns);
 
     std::cout << "Running event loops in parallel...\n";
     ROOT::RDF::RunGraphs(handles);
 
-    const char *dyn_names[] = {"QEL-CC", "QEL-NC", "RES-CC", "RES-NC", "DIS-CC",
-                               "DIS-NC", "COH-CC", "COH-NC", "MEC-CC", "MEC-NC",
-                               "?10",    "?11",    "LEP",    "?13",    "EEL"};
+    constexpr std::array dyn_names = {"QEL-CC", "QEL-NC", "RES-CC", "RES-NC", "DIS-CC",
+                                      "DIS-NC", "COH-CC", "COH-NC", "MEC-CC", "MEC-NC",
+                                      "?10",    "?11",    "LEP",    "?13",    "EEL"};
     for (auto &[set, label] : {std::pair{&s1, &label1}, {&s2, &label2}}) {
         std::cout << "\n=== " << *label << " ===\n";
         std::cout << "Total events: " << *set->total << "\n";
         std::map<int, long> cnt;
         for (int v : *set->dyns) cnt[v]++;
         for (auto &[dyn, n] : cnt) {
-            const char *nm = (dyn >= 0 && dyn < 15) ? dyn_names[dyn] : "unknown";
+            const char *nm = (dyn >= 0 && dyn < (int)dyn_names.size()) ? dyn_names[dyn] : "unknown";
             std::cout << "  dyn=" << dyn << " (" << nm << "): " << n << "\n";
         }
     }
@@ -173,19 +136,12 @@ int main(int argc, char *argv[]) {
     TFile out(outname.c_str(), "RECREATE");
     gStyle->SetOptStat(0);
 
-    struct Pair { TH1D *h1, *h2; std::string name; };
-    std::vector<Pair> pairs = {
-        {(TH1D*)s1.Enu .GetPtr()->Clone(), (TH1D*)s2.Enu .GetPtr()->Clone(), "cmp_Enu"},
-        {(TH1D*)s1.Q2  .GetPtr()->Clone(), (TH1D*)s2.Q2  .GetPtr()->Clone(), "cmp_Q2"},
-        {(TH1D*)s1.muKE.GetPtr()->Clone(), (TH1D*)s2.muKE.GetPtr()->Clone(), "cmp_muKE"},
-        {(TH1D*)s1.nout.GetPtr()->Clone(), (TH1D*)s2.nout.GetPtr()->Clone(), "cmp_nout"},
-        {(TH1D*)s1.dyn .GetPtr()->Clone(), (TH1D*)s2.dyn .GetPtr()->Clone(), "cmp_dyn"},
-    };
-
     std::cout << "\n=== Chi2 comparison ===\n";
-    for (auto &[h1, h2, name] : pairs) {
-        double r = drawComparison(h1, h2, label1, label2, name, out);
-        std::cout << "  " << name << ": chi2/ndf = " << r << "\n";
+    for (auto &&[h1_ptr, h2_ptr, vd] : std::views::zip(s1.histos, s2.histos, kVars)) {
+        auto *h1 = static_cast<TH1D *>(h1_ptr.GetPtr()->Clone());
+        auto *h2 = static_cast<TH1D *>(h2_ptr.GetPtr()->Clone());
+        double r = drawComparison(h1, h2, label1, label2, "cmp_" + vd.name, out);
+        std::cout << "  " << vd.name << ": chi2/ndf = " << r << "\n";
         delete h1; delete h2;
     }
 
