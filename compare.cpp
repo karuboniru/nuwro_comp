@@ -147,8 +147,8 @@ int main(int argc, char *argv[]) {
     handles.push_back(h);
   handles.push_back(s1.total);
   handles.push_back(s2.total);
-  handles.push_back(s1.dyns);
-  handles.push_back(s2.dyns);
+  handles.push_back(s1.dyn_counts);
+  handles.push_back(s2.dyn_counts);
 
   std::cout << "Running event loops in parallel...\n";
   ROOT::RDF::RunGraphs(handles);
@@ -161,10 +161,7 @@ int main(int argc, char *argv[]) {
   for (auto &[set, label] : {std::pair{&s1, &label1}, {&s2, &label2}}) {
     std::cout << "\n=== " << *label << " ===\n";
     std::cout << "Total events: " << *set->total << "\n";
-    std::map<int, long> cnt;
-    for (int v : *set->dyns)
-      cnt[v]++;
-    for (auto &[dyn, n] : cnt) {
+    for (auto &[dyn, n] : *set->dyn_counts) {
       const char *nm = (dyn >= 0 && dyn < (int)dyn_names.size())
                            ? dyn_names[dyn]
                            : "unknown";
