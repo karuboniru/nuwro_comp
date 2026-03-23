@@ -1,5 +1,6 @@
 #pragma once
 #include <functional>
+#include <map>
 #include <ranges>
 #include <string>
 #include <vector>
@@ -47,9 +48,9 @@ inline const std::vector<VarDef> kVars = {
 };
 
 struct HistSet {
-    std::vector<ROOT::RDF::RResultPtr<TH1D>>  histos;  ///< one entry per VarDef
-    ROOT::RDF::RResultPtr<ULong64_t>          total;
-    ROOT::RDF::RResultPtr<std::vector<int>>   dyns;    ///< raw "dyn" leaf for the summary
+    std::vector<ROOT::RDF::RResultPtr<TH1D>>    histos;     ///< one entry per VarDef
+    ROOT::RDF::RResultPtr<ULong64_t>             total;
+    ROOT::RDF::RResultPtr<std::map<int, long>>   dyn_counts; ///< aggregated dyn-channel counts
 };
 
 // Build a lazy computation graph over `files` for each variable in `vars`.
@@ -76,5 +77,15 @@ inline HistSet bookAnalysis(const std::vector<std::string> &files,
         | std::views::transform([&d](const VarDef &v) { return d.Histo1D(v.model, v.name); })
         | std::ranges::to<std::vector>();
 
-    return {std::move(histos), d.Count(), d.Take<int>("dyn")};
+    auto dyn_counts = d.Aggregate(
+        [](std::map<int, long> &m, int dyn) { m[dyn]++; },
+        [](std::vector<std::map<int, long>> &maps) {
+            for (std::size_t i = 1; i < maps.size(); ++i)
+                for (auto &[k, v] : maps[i])
+                    maps[0][k] += v;
+        },
+        "dyn",
+        std::map<int, long>{});
+
+    return {std::move(histos), d.Count(), std::move(dyn_counts)};
 }
