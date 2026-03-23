@@ -1,0 +1,195 @@
+#include <iostream>
+#include <map>
+#include <string>
+#include <vector>
+
+#include <boost/program_options.hpp>
+
+#include "ROOT/RDataFrame.hxx"
+#include "ROOT/RDFHelpers.hxx"
+#include "TCanvas.h"
+#include "TFile.h"
+#include "TLatex.h"
+#include "TLegend.h"
+#include "TLine.h"
+#include "TPad.h"
+#include "TStyle.h"
+
+#include "event1.h"
+
+namespace po = boost::program_options;
+
+struct HistSet {
+    ROOT::RDF::RResultPtr<TH1D>            Enu, Q2, muKE, nout, dyn;
+    ROOT::RDF::RResultPtr<ULong64_t>       total;
+    ROOT::RDF::RResultPtr<std::vector<int>> dyns;
+};
+
+HistSet bookAnalysis(const std::vector<std::string> &files) {
+    ROOT::RDataFrame df("treeout", files);
+
+    auto d = df
+        .Define("Enu", [](const event &e) -> double {
+            return e.in.empty() ? -1.0 : const_cast<event &>(e).in[0].E();
+        }, {"e"})
+        .Define("npost", [](const event &e) { return (int)e.post.size(); }, {"e"})
+        .Define("Q2", [](const event &e) -> double {
+            if (!e.flag.cc || e.in.empty() || e.out.empty()) return -1.0;
+            auto &em = const_cast<event &>(e);
+            vect q = em.in[0] - em.out[0];
+            return -(q * q);
+        }, {"e"})
+        .Define("muKE", [](const event &e) -> double {
+            if (!e.flag.cc || e.out.empty()) return -1.0;
+            return const_cast<event &>(e).out[0].Ek();
+        }, {"e"});
+
+    return {
+        d.Filter("Enu  >= 0").Histo1D({"h_Enu",  "Neutrino energy;E_{#nu} [MeV];1/N dN/dE",         100, 0,    5000}, "Enu"),
+        d.Filter("Q2   >= 0").Histo1D({"h_Q2",   "Momentum transfer;Q^{2} [MeV^{2}];1/N dN/dQ^{2}", 100, 0,    2e6},  "Q2"),
+        d.Filter("muKE >= 0").Histo1D({"h_muKE", "Leading lepton KE;T_{#mu} [MeV];1/N dN/dT",       100, 0,    3000}, "muKE"),
+        d.Histo1D({"h_nout", "Post-FSI multiplicity;N_{out};1/N dN/dN_{out}", 20, 0, 20},  "npost"),
+        d.Histo1D({"h_dyn",  "Interaction channel;dyn;1/N dN/ddyn",           15, -0.5, 14.5}, "dyn"),
+        d.Count(),
+        d.Take<int>("dyn"),
+    };
+}
+
+double drawComparison(TH1D *h1, TH1D *h2,
+                      const std::string &label1, const std::string &label2,
+                      const std::string &cname, TFile &out) {
+    if (h1->Integral() > 0) h1->Scale(1.0 / h1->Integral());
+    if (h2->Integral() > 0) h2->Scale(1.0 / h2->Integral());
+
+    double chi2val = 0.;
+    Int_t  ndf = 0, igood = 0;
+    h1->Chi2TestX(h2, chi2val, ndf, igood, "WW");
+    double chi2_ndf = (ndf > 0) ? chi2val / ndf : 0.;
+
+    TCanvas c(cname.c_str(), h1->GetTitle(), 800, 700);
+    TPad *pad_main  = new TPad("pad_main",  "", 0.0, 0.25, 1.0, 1.0);
+    TPad *pad_ratio = new TPad("pad_ratio", "", 0.0, 0.00, 1.0, 0.25);
+    pad_main ->SetBottomMargin(0.02);
+    pad_ratio->SetTopMargin(0.03);
+    pad_ratio->SetBottomMargin(0.35);
+    pad_main ->Draw(); pad_ratio->Draw();
+
+    pad_main->cd();
+    h1->SetStats(false); h2->SetStats(false);
+    h1->SetLineColor(kBlue + 1); h1->SetLineWidth(2);
+    h2->SetLineColor(kRed  + 1); h2->SetLineWidth(2);
+    h1->GetXaxis()->SetLabelSize(0); h1->GetXaxis()->SetTitleSize(0);
+    h1->SetMaximum(std::max(h1->GetMaximum(), h2->GetMaximum()) * 1.15);
+    h1->Draw("HIST"); h2->Draw("HIST SAME");
+
+    TLegend leg(0.62, 0.72, 0.88, 0.88);
+    leg.SetBorderSize(0);
+    leg.AddEntry(h1, label1.c_str(), "l");
+    leg.AddEntry(h2, label2.c_str(), "l");
+    leg.Draw();
+
+    TLatex tex; tex.SetNDC(); tex.SetTextSize(0.04);
+    tex.DrawLatex(0.62, 0.65, Form("#chi^{2}/ndf = %.2f / %d", chi2val, ndf));
+
+    pad_ratio->cd();
+    TH1D *ratio = static_cast<TH1D *>(h2->Clone("ratio_tmp"));
+    ratio->SetTitle("");
+    ratio->Divide(h1);
+    ratio->SetLineColor(kBlack); ratio->SetLineWidth(1);
+    ratio->GetYaxis()->SetTitle((label2 + " / " + label1).c_str());
+    ratio->GetYaxis()->SetNdivisions(505);
+    ratio->GetYaxis()->SetTitleSize(0.13); ratio->GetYaxis()->SetTitleOffset(0.38);
+    ratio->GetYaxis()->SetLabelSize(0.11);
+    ratio->GetXaxis()->SetTitleSize(0.13); ratio->GetXaxis()->SetLabelSize(0.11);
+    ratio->GetXaxis()->SetTitleOffset(0.9);
+    ratio->SetMinimum(0.9); ratio->SetMaximum(1.1);
+    ratio->Draw("HIST E");
+
+    TLine line(ratio->GetXaxis()->GetXmin(), 1., ratio->GetXaxis()->GetXmax(), 1.);
+    line.SetLineStyle(2); line.SetLineColor(kGray + 1); line.Draw();
+
+    out.cd(); c.Write();
+    delete ratio;
+    return chi2_ndf;
+}
+
+int main(int argc, char *argv[]) {
+    po::options_description desc("NuWro comparison tool");
+    desc.add_options()
+        ("help,h",   "show this help")
+        ("set1",     po::value<std::vector<std::string>>()->multitoken()->required(), "first set of .root files")
+        ("set2",     po::value<std::vector<std::string>>()->multitoken()->required(), "second set of .root files")
+        ("label1",   po::value<std::string>()->default_value("Set 1"), "legend label for set 1")
+        ("label2",   po::value<std::string>()->default_value("Set 2"), "legend label for set 2")
+        ("output,o", po::value<std::string>()->default_value("comparison_out.root"), "output ROOT file");
+
+    po::variables_map vm;
+    try {
+        po::store(po::parse_command_line(argc, argv, desc), vm);
+        if (vm.count("help")) { std::cout << desc << "\n"; return 0; }
+        po::notify(vm);
+    } catch (const po::error &ex) {
+        std::cerr << "Error: " << ex.what() << "\n" << desc << "\n";
+        return 1;
+    }
+
+    const auto files1  = vm["set1"]  .as<std::vector<std::string>>();
+    const auto files2  = vm["set2"]  .as<std::vector<std::string>>();
+    const auto label1  = vm["label1"].as<std::string>();
+    const auto label2  = vm["label2"].as<std::string>();
+    const auto outname = vm["output"].as<std::string>();
+
+    std::cout << "Set 1 (" << label1 << "): " << files1.size() << " file(s)\n";
+    std::cout << "Set 2 (" << label2 << "): " << files2.size() << " file(s)\n";
+
+    auto s1 = bookAnalysis(files1);
+    auto s2 = bookAnalysis(files2);
+
+    std::vector<ROOT::RDF::RResultHandle> handles;
+    for (auto &h : {s1.Enu, s1.Q2, s1.muKE, s1.nout, s1.dyn})
+        handles.push_back(h);
+    for (auto &h : {s2.Enu, s2.Q2, s2.muKE, s2.nout, s2.dyn})
+        handles.push_back(h);
+    handles.push_back(s1.total); handles.push_back(s2.total);
+    handles.push_back(s1.dyns);  handles.push_back(s2.dyns);
+
+    std::cout << "Running event loops in parallel...\n";
+    ROOT::RDF::RunGraphs(handles);
+
+    const char *dyn_names[] = {"QEL-CC", "QEL-NC", "RES-CC", "RES-NC", "DIS-CC",
+                               "DIS-NC", "COH-CC", "COH-NC", "MEC-CC", "MEC-NC",
+                               "?10",    "?11",    "LEP",    "?13",    "EEL"};
+    for (auto &[set, label] : {std::pair{&s1, &label1}, {&s2, &label2}}) {
+        std::cout << "\n=== " << *label << " ===\n";
+        std::cout << "Total events: " << *set->total << "\n";
+        std::map<int, long> cnt;
+        for (int v : *set->dyns) cnt[v]++;
+        for (auto &[dyn, n] : cnt) {
+            const char *nm = (dyn >= 0 && dyn < 15) ? dyn_names[dyn] : "unknown";
+            std::cout << "  dyn=" << dyn << " (" << nm << "): " << n << "\n";
+        }
+    }
+
+    TFile out(outname.c_str(), "RECREATE");
+    gStyle->SetOptStat(0);
+
+    struct Pair { TH1D *h1, *h2; std::string name; };
+    std::vector<Pair> pairs = {
+        {(TH1D*)s1.Enu .GetPtr()->Clone(), (TH1D*)s2.Enu .GetPtr()->Clone(), "cmp_Enu"},
+        {(TH1D*)s1.Q2  .GetPtr()->Clone(), (TH1D*)s2.Q2  .GetPtr()->Clone(), "cmp_Q2"},
+        {(TH1D*)s1.muKE.GetPtr()->Clone(), (TH1D*)s2.muKE.GetPtr()->Clone(), "cmp_muKE"},
+        {(TH1D*)s1.nout.GetPtr()->Clone(), (TH1D*)s2.nout.GetPtr()->Clone(), "cmp_nout"},
+        {(TH1D*)s1.dyn .GetPtr()->Clone(), (TH1D*)s2.dyn .GetPtr()->Clone(), "cmp_dyn"},
+    };
+
+    std::cout << "\n=== Chi2 comparison ===\n";
+    for (auto &[h1, h2, name] : pairs) {
+        double r = drawComparison(h1, h2, label1, label2, name, out);
+        std::cout << "  " << name << ": chi2/ndf = " << r << "\n";
+        delete h1; delete h2;
+    }
+
+    out.Close();
+    std::cout << "\nComparison plots saved to " << outname << "\n";
+    return 0;
+}
